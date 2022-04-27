@@ -69,18 +69,15 @@ md"
 Parsing will be done on the blk*.dat files present within the **blocks** folder. The current size of this directory is ~ 424 GB (checked on 11-04-2022) and is only expected to grow as time progresses.
 
 My PC is equipped with a PCIe gen3 NVMe SSD. The disk IO is therefore quite fast! Even with that, it took about 10-12 minutes to parse through all the data.
+
+We can iterate through the `chain` object of type `BTCParser.Chain`, which is quite handy to gather statistics over a selection of blocks.
 "
 
 # ╔═╡ 8885beb3-5cbc-4159-86e5-63134649bb08
 chain = make_chain()
 
-# ╔═╡ c90c1e0b-ba39-4bae-b56e-af7ecf964b01
-md"
-We can iterate through the `chain` object of type `BTCParser.Chain`, which is quite handy to gather statistics over a selection of blocks.
-"
-
 # ╔═╡ ffac62f0-8cbb-4914-8027-78b5fdf67711
-chain[1]
+chain[0]
 
 # ╔═╡ fd4cb49b-96bc-4b97-be13-32a48120de56
 typeof(chain)
@@ -118,14 +115,12 @@ This value is obtained by summing over all the outputs in a given block.
 # ╔═╡ e496c391-af1d-4523-9dbe-1b0caba40921
 function get_total_tx_value(block::Block)
 
-	num_tx = length(block.transactions)
 	output_per_tx = Int64[]
 
-	for i = 1:num_tx
-		num_outputs = length(block.transactions[i].outputs)
-
+	for i in eachindex(block.transactions)
+		
 		output_amount = 0
-		for j = 1:num_outputs
+		for j in eachindex(block.transactions[i].outputs)
 			output_amount += convert(Int64, 
 				                     block.transactions[i].outputs[j].amount)
 		end
@@ -205,10 +200,10 @@ Our original DataFrame contains blocks with a time interval of ~ 10 minutes. For
 function get_daily_data(df_blocks::DataFrame)
 
 	rows, cols = size(df_blocks)
-	j = 1
+    j = 1
 	day = Date[]
 	tx_per_day, diff_per_day  = [Int64[] for i = 1:2]	
-	tx_value_per_day = Float64[]
+	tx_value_per_day, rewards_per_day = [Float64[] for i = 1:2]
 
 	for i = 2:rows
 
@@ -216,35 +211,35 @@ function get_daily_data(df_blocks::DataFrame)
 		if Dates.Date(df_blocks[!, :tstamp][i]) != 
 		   Dates.Date(df_blocks[!, :tstamp][i - 1])
 
-			tx_sum    = sum(df_blocks[!, :tx][j:i - 1])
-			diff_mean = Statistics.mean(df_blocks[!, :diff][j:i - 1])
-			tx_value_sum = sum(df_blocks[!, :tx_value][j:i - 1])
-
-			push!(day, Dates.Date(df_blocks[!, :tstamp][i - 1]))
-			push!(tx_per_day, tx_sum)
-			push!(diff_per_day, round(Int64, diff_mean))
-			push!(tx_value_per_day, tx_value_sum)
-
+			start_at = j
+			stop_at  = i - 1 
 			j = i
 
+		# When counter reaches the last day
+		elseif i == rows
+
+			start_at = j
+			stop_at  = i
+
+		else
+			continue
 		end
 
-		# When counter reaches the last day
-		if i == rows
-			
-			tx_sum = sum(df_blocks[!, :tx][j:i])
-			diff_mean = Statistics.mean(df_blocks[!, :diff][j:i])
-			tx_value_sum = sum(df_blocks[!, :tx_value][j:i])
-			
-			push!(day, Dates.Date(df_blocks[!, :tstamp][i - 1]))
-			push!(tx_per_day, tx_sum)
-			push!(diff_per_day, round(Int64, diff_mean))
-			push!(tx_value_per_day, tx_value_sum)
-		end
+		tx_sum    = sum(df_blocks[!, :tx][start_at:stop_at])
+		diff_mean = Statistics.mean(df_blocks[!, :diff][start_at:stop_at])
+		tx_value_sum = sum(df_blocks[!, :tx_value][start_at:stop_at])
+		rewards_mean = Statistics.mean(df_blocks[!, :block_rewards][start_at:stop_at])
+		
+		push!(day, Dates.Date(df_blocks[!, :tstamp][stop_at]))
+		push!(tx_per_day, tx_sum)
+		push!(diff_per_day, round(Int64, diff_mean))
+		push!(tx_value_per_day, tx_value_sum)
+		push!(rewards_per_day, rewards_mean)			
 	end
 
 	df_blocks_per_day = DataFrame(tstamp = day, diff = diff_per_day, 
-	                             tx = tx_per_day, tx_value = tx_value_per_day)
+	                             tx = tx_per_day, tx_value = tx_value_per_day,
+	                             block_rewards = rewards_per_day)
 
 	return df_blocks_per_day
 end
@@ -311,23 +306,48 @@ md"
 Using the timestamps, we can calculate the amount of time elapsed between consecutive blocks. The Bitcoin network adjusts its diffculty such that a block is generated on an average in ~ 10 minutes. Since difficulty adjustment is not instantaneous, there  are blocks with shorter or longer duration as well. Blocks will be generated faster when the network hashrate increases significantly and difficulty is gradually readjusting to a higher value. On the contrary, a sudden dip in the network hashrate will increase block generation time until the difficulty readjusts to a lower value.
 "
 
-# ╔═╡ 0adbb794-5094-4a66-ae71-c3646d6cf636
-function get_block_tstamps(df_blocks::DataFrame)
+# ╔═╡ a5472101-5d8e-468a-8580-8912fe90a289
+df_blocks_all = get_block_data(chain, 0, 729945)
 
-	block_tstamps = df_blocks[!, :tstamp][2:end] - df_blocks[!, :tstamp][1:end-1]
-	block_mins    = [block_tstamps[i].value / 60000 for i in eachindex(block_tstamps)]
+# ╔═╡ 0adbb794-5094-4a66-ae71-c3646d6cf636
+function get_block_time(df_blocks::DataFrame)
+
+	# Difference between consecutive blocks
+	Δ_block_tstamps = df_blocks[!, :tstamp][2:end] - df_blocks[!, :tstamp][1:end-1]
+
+	# Convert ms to mins
+	block_mins = [Δ_block_tstamps[i].value/60000 for i in eachindex(Δ_block_tstamps)]
 
 	return DataFrame(block_mins = block_mins)
 end	
 
 # ╔═╡ fb15df5b-e024-44b0-8d44-4e2274477f8d
-@btime get_block_tstamps(df_blocks);
+@btime get_block_time(df_blocks_all);
+
+# ╔═╡ e09886d9-9cfd-4399-ad6b-744e0c6fa4ec
+function get_block_time_slow(df_blocks::DataFrame)
+
+	# Difference between consecutive blocks
+	Δ_block_tstamps = df_blocks[!, :tstamp][2:end] - df_blocks[!, :tstamp][1:end-1]
+
+	# Convert ms to mins
+	block_mins = Array{Float64}(undef, length(Δ_block_tstamps))
+
+	for i in eachindex(Δ_block_tstamps)
+		block_mins[i]  = Δ_block_tstamps[i].value/60000 
+	end
+	
+	return DataFrame(block_mins = block_mins)
+end	
+
+# ╔═╡ d45b5dad-c6ab-4067-8197-bbe2fbb9fa37
+@btime get_block_time_slow(df_blocks_all);
 
 # ╔═╡ 8f5c4bda-16c8-48a2-90f0-43f54e2eadbb
-figure3 =  get_block_tstamps(df_blocks) |> 
+figure3 =  get_block_tstamps(df_blocks) |> @filter(_.block_mins > 0) |>
 	
 @vlplot(:bar, 
-	x = {:block_mins, "bin" = {"maxbins" = 25}, "axis" = {"title" = "Block time [mins]", "labelFontSize" = 12, "titleFontSize" = 14}}, 
+	x = {:block_mins, "bin" = {"maxbins" = 20}, "axis" = {"title" = "Block time [mins]", "labelFontSize" = 12, "titleFontSize" = 14}}, 
 	y = {"count()", "axis" = {"title" = "Number of counts", "labelFontSize" = 12, "titleFontSize" = 14 }}, 
 	width = 750, height = 500, 
 	"title" = {"text" = "Distribution of BTC block times", "fontSize" = 16})
@@ -337,19 +357,40 @@ md"
 ##### Block reward halving
 "
 
+# ╔═╡ 75f6308b-e4ee-48ab-9f5c-19c08dda694f
+md"
+Some blocks show rewards lower than expected. Not sure why that happens. Here, we filter out blocks which have < 5 BTC as the reward.
+"
+
+# ╔═╡ 7c833f04-cb08-44b7-97a2-760a1af25c0a
+begin
+	df_blocks_all_filter = df_blocks_all |> @filter(_.block_rewards > 5) |> DataFrame;
+	rows, cols = size(df_blocks_all_filter)
+end
+
+# ╔═╡ 162dca70-2c4a-49b0-8994-8fcaf123f30b
+md"
+Rewards are plotted for every 1000th block, otherwise the program crashes with *JavaScript heap out of memory* errors.
+"
+
 # ╔═╡ c20f28f7-2925-46ed-98f8-f8f63fc3bbc8
-convert(Int64, Block(chain[600000]).transactions[1].outputs[1].amount)
+figure4 = df_blocks_all_filter[1:1000:rows, [:tstamp, :block_rewards]] |>
+
+@vlplot(mark = {:line, interpolate = "monotone"}, 
+	x = {:tstamp, "axis" = {"title" = "Time", "labelFontSize" = 12, "titleFontSize" = 14}, "type" = "temporal"}, 
+	y = {:block_rewards, "axis" = {"title" = "Block reward + Transaction fees [BTC]", "labelFontSize" = 12, "titleFontSize" = 14 }}, 
+	width = 750, height = 500, 
+	"title" = {"text" = "Total rewards starting from genesis block", "fontSize" = 16})
 
 # ╔═╡ Cell order:
 # ╟─a3c994b5-26fc-43c1-915c-3b77bd55574a
 # ╟─8209bb38-36b1-4309-b33e-f5c91f9fc01a
 # ╟─5fb90837-8d28-46f8-a911-8e7a72e01a84
-# ╠═f65a01a2-31df-4445-9a3d-3bb3105113d8
+# ╟─f65a01a2-31df-4445-9a3d-3bb3105113d8
 # ╠═a628bf59-823f-47e9-ac19-e26dfa87a19f
 # ╟─db629dfc-2662-4c30-93dd-79fa085b4272
 # ╟─1c7333d8-0b17-42da-86fc-4d3d4dabf528
 # ╠═8885beb3-5cbc-4159-86e5-63134649bb08
-# ╟─c90c1e0b-ba39-4bae-b56e-af7ecf964b01
 # ╠═ffac62f0-8cbb-4914-8027-78b5fdf67711
 # ╠═fd4cb49b-96bc-4b97-be13-32a48120de56
 # ╟─a96489a4-a18b-4386-a932-013506aefc6c
@@ -379,9 +420,15 @@ convert(Int64, Block(chain[600000]).transactions[1].outputs[1].amount)
 # ╟─9eef762a-174c-42c3-bc87-b0c5034aa9cc
 # ╠═d2da1ea6-974d-4b54-810b-2fad814cc273
 # ╟─0e5b15e8-9318-4e6d-bf36-c6b528cc8a4c
-# ╠═759eca19-a79f-43f7-ae34-bd9e8991b198
+# ╟─759eca19-a79f-43f7-ae34-bd9e8991b198
+# ╠═a5472101-5d8e-468a-8580-8912fe90a289
 # ╟─0adbb794-5094-4a66-ae71-c3646d6cf636
 # ╠═fb15df5b-e024-44b0-8d44-4e2274477f8d
+# ╟─e09886d9-9cfd-4399-ad6b-744e0c6fa4ec
+# ╠═d45b5dad-c6ab-4067-8197-bbe2fbb9fa37
 # ╠═8f5c4bda-16c8-48a2-90f0-43f54e2eadbb
 # ╟─b903dd3f-f52e-455e-8c0b-0b5dc93af4a1
+# ╟─75f6308b-e4ee-48ab-9f5c-19c08dda694f
+# ╠═7c833f04-cb08-44b7-97a2-760a1af25c0a
+# ╟─162dca70-2c4a-49b0-8994-8fcaf123f30b
 # ╠═c20f28f7-2925-46ed-98f8-f8f63fc3bbc8
